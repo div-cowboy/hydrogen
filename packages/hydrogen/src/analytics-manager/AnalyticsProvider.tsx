@@ -1,5 +1,8 @@
 import {
+  type Dispatch,
   type ReactNode,
+  type SetStateAction,
+  startTransition,
   useEffect,
   useState,
   useMemo,
@@ -293,12 +296,28 @@ function AnalyticsProvider({
   const {shop} = useShopAnalytics(shopProp);
   const [consentVersion, setConsentVersion] = useState(0);
   const [privacyReady, setPrivacyReady] = useState(false);
-  const [carts, setCarts] = useState<Carts>({cart: null, prevCart: null});
+  const [carts, setCartsState] = useState<Carts>({cart: null, prevCart: null});
   const canTrack = customCanTrack ?? hasAnalyticsConsent;
+
+  // This provider sits above every route-level Suspense boundary, so an urgent
+  // update from it interrupts hydration and forces boundaries that are still
+  // dehydrated to discard their server HTML and client-render (React #421).
+  // None of this analytics bookkeeping is urgent, so every update that can land
+  // after hydration begins is applied as a transition.
+  //
+  // `setCarts` is handed to `CartAnalytics`, which applies it when the deferred
+  // cart resolves. Transition at the declaration, not at that call site, so the
+  // guarantee holds for every caller.
+  const setCarts = useCallback<Dispatch<SetStateAction<Carts>>>(
+    (update) => startTransition(() => setCartsState(update)),
+    [],
+  );
   const onConsentChange = useCallback(() => {
-    setPrivacyReady(true);
-    // Re-evaluate the context when consent changes, including later revocation.
-    setConsentVersion((version) => version + 1);
+    startTransition(() => {
+      setPrivacyReady(true);
+      // Re-evaluate the context when consent changes, including later revocation.
+      setConsentVersion((version) => version + 1);
+    });
   }, []);
 
   // eslint-disable-next-line no-extra-boolean-cast
@@ -408,7 +427,11 @@ function useShopAnalytics(shopProp: AnalyticsProviderProps['shop']): {
 
   // resolve the shop analytics that could have been deferred
   useEffect(() => {
-    Promise.resolve(shopProp).then(setShop);
+    // Transitioned for the same reason as the provider's other deferred
+    // updates: this lands after hydration begins and must not interrupt it.
+    Promise.resolve(shopProp).then((resolvedShop) => {
+      startTransition(() => setShop(resolvedShop));
+    });
     return () => {};
   }, [setShop, shopProp]);
 
